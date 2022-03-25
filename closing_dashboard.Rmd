@@ -315,7 +315,7 @@ ggplot(people_range) +
         axis.ticks.x = element_blank()) +
   labs(title = 'Who is getting into accidents in Chicago?',
        fill = 'Age Range',
-       caption = 'ALl Data from Chicago Open Data') +
+       caption = 'All Data from Chicago Open Data') +
   ylab('') +
   xlab('') +
   scale_fill_manual(values = flag_colors[-2],
