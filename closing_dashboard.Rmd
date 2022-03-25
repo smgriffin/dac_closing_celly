@@ -1,0 +1,350 @@
+---
+title: "Chicago Traffic Accidents"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme:
+      version: 4
+      bg: '#edf2f4'
+      fg: '#edf2f4'
+      navbar-bg: '#1d3557'
+      heading_font:
+        google: Roboto
+      
+---
+
+```{r setup, include=FALSE}
+# Load Packages
+library(flexdashboard)
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(tmap)
+library(ggraph)
+library(calendR)
+library(tidygraph)
+library(ggmosaic)
+library(scales)
+```
+
+```{r}
+# Function Declarations
+scale_fn <- function(x) { x / sqrt(sum(x^2)) }
+
+`%!in%` <- Negate(`%in%`)
+
+count_summary <- function(data){
+  data %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n())
+}
+```
+
+```{r}
+# Theme and Colors
+flag_colors <- c('#e63946', '#f1faee', '#a8dadc', '#457b9d', '#1d3557')
+
+grey_red <- c('#2b2d42', '#8d99ae', '#edf2f4', '#ef233c', '#d90429')
+
+bg_color <- '#f8f9fa'
+
+bg_photo <- '/Users/SG/Documents/Programming/dac2022/closing_celebration/pedro-lastra-Nyvq2juw4_o-unsplash.jpg'
+
+theme_cel <- function(base_size = 11,
+                      base_family = 'serif'){
+    theme(
+      # Rect and Line
+      rect = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      line = element_line(color = grey_red[1]),
+      
+      # Remove y axis / Adjust x axis
+      axis.ticks = element_line(),
+      axis.ticks.y = element_blank(),
+      axis.line = element_line(linetype = 1, colour = grey_red[1]),
+      
+      # Change Legend background color 
+      legend.key = element_rect(linetype = 0, fill = bg_color),
+      
+      # Clear background and change color
+      panel.background = element_rect(linetype = 0, fill = bg_color),
+      panel.border = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.background = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      plot.background = element_rect(fill = bg_color, colour = NA))
+}
+```
+
+```{r}
+# Scrape Data from Chicago Open Data
+vehicles <- jsonlite::read_json('https://data.cityofchicago.org/resource/68nd-jvt3.json', simplifyVector = TRUE)
+
+crashes <- jsonlite::read_json('https://data.cityofchicago.org/resource/85ca-t3if.json', simplifyVector = TRUE)
+
+people <- jsonlite::read_json('https://data.cityofchicago.org/resource/u6pd-qa9d.json', simplifyVector = TRUE)
+
+path <- '/Users/SG/Documents/Programming/dac2022/L9_Upload/chicago_tracts_2010.shp'
+```
+
+```{r}
+# Some preliminary cleaning and joining Vehicles + Crashes
+vehicles <- vehicles %>%
+  select(id = crash_record_id,
+         date = crash_date,
+         make,
+         model,
+         travel_direction,
+         maneuver,
+         occupants = occupant_cnt,
+         area_hit = first_contact_point) %>%
+  mutate(date = ymd_hms(date))
+
+people <- people %>%
+  select(id = crash_record_id,
+         zipcode,
+         sex,
+         age)
+
+crashes <- crashes %>%
+  select(id = crash_record_id,
+         street = street_name,
+         latitude,
+         longitude,
+         location)
+
+traffic <- left_join(vehicles, crashes, by = 'id')
+```
+
+Overview
+==================
+
+Row
+-----------------------------------------------------------------------
+
+
+###
+```{r fig.width = 15, fig.height = 8}
+# Get # of Accidents per Date and add a scaled column to work with calendR package
+date_traffic <- traffic %>%
+  group_by(date = as.Date(date)) %>%
+  summarise(accidents = n()) %>%
+  mutate(scale_acc = scale_fn(accidents))
+
+# Hacky way to get days to gradiant, see calendR docs
+days <- rep(min(date_traffic$scale_acc) - 0.05, days_in_month(Sys.Date()))
+
+# More
+days[as.numeric(format(date_traffic$date, format = '%d'))] <- date_traffic$scale_acc
+
+# Absolute gongshow of a calendar
+calendR(year = as.numeric(unique(format(date_traffic$date, format = '%Y'))),
+        month = as.numeric(unique(format(date_traffic$date, format = '%m'))),
+        special.days = days,
+        gradient = TRUE,
+        low.col = '#edf2f4',
+        special.col = '#e63946',
+        bg.img = bg_photo,
+        title = 'Heatmap of Most Recent Traffic Accidents',
+        title.size = 30,
+        title.col = grey_red[1],
+        lty = 1,
+        lwd = 0.1,
+        col = grey_red[1],
+        days.col = grey_red[1],
+        day.size = 6,
+        subtitle = 'Chicago, IL | Photo: Pedro Lastra',
+        subtitle.col = grey_red[1],
+        subtitle.size = 15,
+        weeknames = c("Mo", "Tu",  
+                      "We", "Th",
+                      "Fr", "Sa",
+                      "Su"),
+        weeknames.col = 'black',
+        weeknames.size = 8,
+        text = date_traffic$accidents,
+        text.pos = as.numeric(unique(format(date_traffic$date, format = '%d'))),
+        text.size = 8,
+        text.col = grey_red[1],
+        font.family = 'sans')
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Map of Recent Traffic Accidents, Tooltip = # of Accidents at Location
+
+```{r echo = FALSE, message = FALSE, warning = FALSE, fig.height = 8}
+# Pull Chicago Shapefile
+chi_sf <- st_read(path, quiet = TRUE)
+chi_sf <- st_transform(chi_sf, 4326)
+
+# Convert lat/long from original data to sf
+traffic_sf <- traffic %>% drop_na(c(latitude, longitude)) %>%
+  st_as_sf(coords = c('longitude', 'latitude'), crs = 4326)
+
+# Join the two shape files
+traffic_sf <- st_join(
+  traffic_sf,
+  chi_sf, 
+  join = st_within
+  )
+
+# Drop extra geometry
+traffic_sf$geometry.1 <- NULL
+
+# Find the accidents per GEOID
+traffic_sf <- traffic_sf %>%
+  group_by(geoid) %>%
+  summarise(count = n())
+
+labels <- as.character(traffic_sf$count)
+
+# Leaflet
+tmap_mode('view')
+tm_shape(traffic_sf, name="Chicago Accidents") +
+  tm_bubbles(size = 'count', col = grey_red[5], scale = 5/12, id = 'count', alpha = 0.7) +
+  tm_basemap('Esri.WorldStreetMap')
+```
+
+Vehicles
+==================
+
+Row {data-height=650}
+-------------------------------------
+
+```{r fig.width = 16, fig.height = 6.75}
+traffic_connect_prop <- traffic %>%
+  mutate(area_hit = replace(area_hit, area_hit == 'OTHER', 'OTHER AREA'),
+         area_hit = replace(area_hit, area_hit == 'TOTAL (ALL AREAS)', 'TOTAL')) %>%count_summary() %>%
+  mutate(percent = n/sum(n) * 100) %>%
+  rename(crashes = n)
+
+traffic_connect_prop %>%
+  ggraph(layout = "linear", circular = TRUE) +
+  geom_edge_arc(aes(edge_alpha = percent, edge_width = percent), color = flag_colors[1], fold = TRUE) +
+  geom_node_text(aes(filter = name %in% traffic_connect_prop$area_hit, label = name), size = 3, hjust = 1) +
+  geom_node_label(aes(filter = name %in% traffic_connect_prop$maneuver, label = name), size = 3, fill = flag_colors[2]) +
+  theme_cel() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank()) +
+        #plot.background = element_rect(fill = flag_colors[3], colour = NA),
+      # rect = element_rect(fill = flag_colors[3]),
+       #panel.background = element_rect(fill = flag_colors[3], colour = NA, linetype = 0),
+       #legend.key = element_rect(fill = flag_colors[3])) +
+  labs(title = 'Where is the First Point of Contact, Given a Maneuver?',
+       subtitle = 'Labels are Maneuvers, Thickness is % of Accidents Hitting Area')
+```
+
+Row {data-height=350}
+-------------------------------------
+
+```{r fig.width = 8}
+traffic %>%
+  filter(!is.na(make),
+         make != 'UNKNOWN') %>%
+  mutate(make = fct_lump(make, n = 20)) %>%
+  group_by(make) %>%
+  summarise(n = n()) %>%
+  mutate(make = str_to_title(make),
+         make = fct_reorder(make, n)) %>%
+  ggplot() +
+  geom_segment(aes(x = make, xend = make, y = 0, yend = n), color = grey_red[2]) +
+  geom_point(aes(x = make, y = n), size = 5, color = flag_colors[4]) +
+  coord_flip() +
+  theme_cel() +
+  xlab('') +
+  ylab('') +
+  scale_y_continuous(limits = c(0, 120), expand = c(0,0)) +
+  labs(title = 'Number of Accidents by Car Make',
+       subtitle = 'Chicago, IL in the Past ~4 Days') +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(hjust = .75))
+```
+
+```{r fig.width = 8}
+traffic %>%
+  filter(!is.na(model),
+         make != 'UNKNOWN',
+         model != 'OTHER (EXPLAIN IN NARRATIVE)',
+         make != 'MOTORIZED') %>%
+  group_by(model, make) %>%
+  summarise('count' = n()) %>%
+  arrange(desc(count)) %>%
+  head(12) %>%
+  ggplot() +
+  geom_col(aes(x = fct_rev(fct_reorder(model, count)), y = count, fill = make), color = 'gray') +
+  scale_fill_manual(values = flag_colors) +
+  labs(title = 'What make and model cars are getting in the most accidents?',
+       subtitle = '...or maybe simply which are popular',
+       fill = 'Make') +
+  ylab('Number of Accidents') +
+  xlab('Model') +
+  theme_cel() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+```
+
+People/Time
+==================
+
+Row {fig.width = 7}
+-------------------------------------
+###
+
+```{r}
+people_range <- people %>%
+  drop_na(sex, age) %>%
+  filter(sex %!in% 'X') %>%
+  mutate(age_range = case_when(age < 25 ~'under 25',
+                               age < 45 ~'25-45',
+                               age < 65 ~'45-65',
+                               TRUE ~'over 65'),
+         sex = case_when(sex == 'F' ~'Female',
+                         sex == 'M' ~'Male'))
+
+people_range$age_range <- factor(people_range$age_range, levels = c('under 25', '25-45', '45-65', 'over 65'))
+
+
+ggplot(people_range) +
+  geom_mosaic(aes(x = product(sex), fill = age_range)) +
+  theme_cel() +
+  theme(axis.line = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(title = 'Who is getting into accidents in Chicago?',
+       fill = 'Age Range',
+       caption = 'ALl Data from Chicago Open Data') +
+  ylab('') +
+  xlab('') +
+  scale_fill_manual(values = flag_colors[-2],
+                    guide=guide_legend(reverse=T)) 
+```
+
+###
+```{r}
+traffic %>%
+  group_by(time = hour(date)) %>%
+  summarise(accidents = n()) %>%
+  ggplot() +
+  geom_rect(aes(xmin = -0.5, xmax = 6, ymin = 0, ymax = Inf), fill = flag_colors[3], alpha = 0.02) +
+  geom_rect(aes(xmin = 6, xmax = 18, ymin = 0, ymax = Inf), fill = '#ffb703', alpha = 0.02) +
+  geom_rect(aes(xmin = 18, xmax = 24, ymin = 0, ymax = Inf), fill = flag_colors[3], alpha = 0.02) +
+  geom_col(aes(x = time, y = accidents, fill = accidents)) +
+  theme_cel() +
+  coord_polar(start = 6.21, direction = 1) +
+  scale_fill_gradient2(low = grey_red[3],
+                       high = flag_colors[5])  +
+  scale_x_continuous(breaks = (seq(0,23,1))) +
+  theme(axis.line = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(vjust = 1)) +
+  labs(title = '24 Hour Clock of When Accidents Occur',
+        subtitle = 'Chicago, IL Recent ~4 days',
+       caption = 'data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if') +
+  xlab('') +
+  ylab('')
+```
+
