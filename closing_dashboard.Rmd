@@ -87,7 +87,7 @@ crashes <- jsonlite::read_json('https://data.cityofchicago.org/resource/85ca-t3i
 
 people <- jsonlite::read_json('https://data.cityofchicago.org/resource/u6pd-qa9d.json', simplifyVector = TRUE)
 
-path <- '/Users/SG/Documents/Programming/dac2022/L9_Upload/chicago_tracts_2010.shp'
+path <- ''
 ```
 
 ```{r}
