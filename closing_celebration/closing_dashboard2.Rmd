@@ -1,0 +1,526 @@
+---
+title: "Chicago Traffic Accidents"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    source_code: embed
+    theme:
+      version: 4
+      bg: '#edf2f4'
+      fg: '#edf2f4'
+      primary: "#1d3557"
+      navbar-bg: '#1d3557'
+      heading_font:
+        google: Roboto
+      
+---
+
+```{r setup & libraries, include=FALSE}
+# Load Packages
+library(flexdashboard)
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(tmap)
+library(ggraph)
+library(calendR)
+library(tidygraph)
+library(ggmosaic)
+library(scales)
+
+# Used for WD
+path <- '/Users/SG/Documents/Programming/dac2022/closing_celebration/'
+
+```
+
+```{r function declarations}
+# Scaling function because calendaR for some reason only takes values < 365
+scale_fn <- function(x) { x / sqrt(sum(x^2)) }
+
+
+# You already know
+`%!in%` <- Negate(`%in%`)
+
+# Quick summary
+count_summary <- function(data){
+  data %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n())
+}
+```
+
+```{r colors & theme}
+# Theme and Colors from Coolor
+flag_colors <- c('#e63946', '#f1faee', '#a8dadc', '#457b9d', '#1d3557')
+
+grey_red <- c('#2b2d42', '#8d99ae', '#edf2f4', '#ef233c', '#d90429')
+
+bg_color <- '#f8f9fa'
+
+bg_photo <- paste(path,'pedro-lastra-Nyvq2juw4_o-unsplash.jpg', sep = '')
+
+# Minimalist theme Coolor bg color
+theme_cel <- function(base_size = 11,
+                      base_family = 'serif'){
+    theme(
+      # Rect and Line
+      rect = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      line = element_line(color = grey_red[1]),
+      
+      # Remove y axis / Adjust x axis
+      axis.ticks = element_line(),
+      axis.ticks.y = element_blank(),
+      axis.line = element_line(linetype = 1, colour = grey_red[1]),
+      
+      # Change Legend background color 
+      legend.key = element_rect(linetype = 0, fill = bg_color),
+      
+      # Clear background and change color
+      panel.background = element_rect(linetype = 0, fill = bg_color),
+      panel.border = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.background = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      plot.background = element_rect(fill = bg_color, colour = NA))
+}
+```
+
+```{r load data}
+# Download Data from Chicago Open Data
+crashes <- janitor::clean_names(read_csv(paste(path, 'Traffic_Crashes_-_Crashes.csv', sep = '')))
+
+people <- janitor::clean_names(read_csv(paste(path,'Traffic_Crashes_-_People.csv', sep = '')))
+
+vehicles <- janitor::clean_names(read_csv(paste(path, 'Traffic_Crashes_-_Vehicles.csv', sep = '')))
+```
+
+```{r munging & joining}
+# Some preliminary cleaning and joining Vehicles + Crashes
+vehicles <- vehicles %>%
+  
+  # Select Rows
+  select(id = crash_record_id,
+         date = crash_date,
+         make,
+         model,
+         travel_direction,
+         maneuver,
+         occupants = occupant_cnt,
+         area_hit = first_contact_point) %>%
+  
+  # Char to Date
+  mutate(date = mdy_hms(date),
+         
+         # Some models have silly names
+         model = replace(model, str_detect(model,'SENTRA'), 'SENTRA'),
+         model = replace(model, str_detect(model,'MALIBU'), 'MALIBU'),
+         model = replace(model, str_detect(model,'RAV4'), 'RAV4'),
+         model = replace(model, str_detect(model,'ALTIMA'), 'ALTIMA'))
+
+people <- people %>%
+  
+  # Select relevant columns
+  select(id = crash_record_id,
+         action = driver_action,
+         zipcode,
+         sex,
+         age,
+         injury = injury_classification,
+         airbag = airbag_deployed)
+
+crashes <- crashes %>%
+  
+  # Select columns
+  select(id = crash_record_id,
+         street = street_name,
+         weather = weather_condition,
+         roadtype = trafficway_type,
+         road_cond = roadway_surface_cond,
+         crash_type,
+         damage,
+         latitude,
+         longitude,
+         location)
+
+# Join data and filter, for interactive remove filter
+traffic <- left_join(vehicles, crashes, by = 'id') %>% filter(year(date) == 2021)
+```
+
+
+
+Overview
+==================
+
+Row
+-----------------------------------------------------------------------
+
+###
+```{r calendar heatmap, fig.width = 15, fig.height = 8}
+
+# Grouping by date and scaling accidents, calendR can only take values < 365
+date_traffic <- traffic %>%
+  filter(year(date) == 2021) %>%
+  group_by(date = as.Date(date)) %>%
+  summarise(accidents = n()) %>%
+  mutate(scale_acc = scale_fn(accidents))
+
+
+# Only relevant for reactive dashboard.  special.days must be length 365 and current year is incomplete
+if (unique(year(date_traffic$date)) == year(Sys.Date())){
+    
+    days <- rep(min(date_traffic$scale_acc) - 0.05, 365)
+    days[1:nrow(date_traffic)] <- date_traffic$scale_acc
+} else {
+    days <- date_traffic$scale_acc
+}
+
+
+# Create calendar
+calendR(year = as.numeric(unique(format(date_traffic$date, format = '%Y'))),
+        special.days = days,
+        gradient = TRUE,
+        low.col = '#edf2f4',
+        special.col = '#e63946',
+        bg.img = bg_photo,
+        title = paste('Heatmap of Traffic Accidents Year ', unique(year(date_traffic$date))),
+        title.size = 20,
+        title.col = grey_red[1],
+        lty = 1,
+        lwd = 0.1,
+        col = grey_red[1],
+        days.col = grey_red[1],
+        day.size = 3,
+        subtitle = 'Chicago, IL | Photo: Pedro Lastra',
+        subtitle.col = grey_red[1],
+        weeknames = c("Mo", "Tu",  
+                      "We", "Th",
+                      "Fr", "Sa",
+                      "Su"),
+        weeknames.col = 'black',
+        weeknames.size = 4,
+        mbg.col = bg_color,
+        font.family = 'sans')
+```
+
+Row
+-----------------------------------------------------------------------
+
+###
+
+```{r tmap, echo = FALSE, message = FALSE, warning = FALSE, fig.height = 8}
+# Pull Chicago Shapefile
+chi_sf <- st_read(paste(path, 'chicago_tracts_2010.shp', sep = ''), quiet = TRUE)
+chi_sf <- st_transform(chi_sf, 4326)
+
+# Convert lat/long from original data to sf
+traffic_sf <- traffic %>% 
+  filter(year(date) == 2021 &
+         month(date) == month(Sys.Date())) %>%
+  drop_na(c(latitude, longitude)) %>%
+  st_as_sf(coords = c('longitude', 'latitude'), crs = 4326)
+
+# Join the two shape files
+sf_join <- chi_sf %>% st_join(traffic_sf, left = TRUE, join = st_intersects)
+
+
+# Find the accidents per GEOID
+sf_group <- sf_join %>%
+  group_by(geoid) %>%
+  summarise(accidents = n())
+
+
+# tmap
+tmap_mode(mode = 'view')
+tm_shape(sf_group) +
+  tm_fill('accidents', id = 'accidents', alpha = 0.6)  +
+          tm_borders(col = 'grey40', alpha = 0.5, lwd = .4) +
+   tm_layout(aes.palette = list(seq = "-RdBu")) +
+  tm_basemap('Esri.WorldTopoMap') +
+  tm_layout(title = 'Chicago Traffic Accidents 2021',
+            outer.bg.color = bg_color,
+            legend.bg.color = bg_color,
+            title.bg.color = bg_color,
+            bg.color = bg_color)
+```
+
+###
+```{r clock plot}
+
+# group by time and summarise
+traffic %>%
+  filter(year(date) == 2021) %>%
+  group_by(time = hour(date)) %>%
+  summarise(accidents = n()) %>%
+  
+  # ggplot
+  ggplot() +
+  
+  # first night rectangle
+  geom_rect(aes(xmin = -0.5, xmax = 6, ymin = 0, ymax = Inf), fill = flag_colors[3], alpha = 0.02) +
+  
+  # day rectangle
+  geom_rect(aes(xmin = 6, xmax = 18, ymin = 0, ymax = Inf), fill = '#ffb703', alpha = 0.02) +
+  
+  # second night rectangle
+  geom_rect(aes(xmin = 18, xmax = 24, ymin = 0, ymax = Inf), fill = flag_colors[3], alpha = 0.02) +
+  
+  # simple bar plot
+  geom_col(aes(x = time, y = accidents, fill = accidents)) +
+  
+  # custom theme
+  theme_cel() +
+  
+  # now polar start gets it more centered and clock-ish
+  coord_polar(start = 6.21, direction = 1) +
+  
+  # aesthetics
+  scale_fill_gradient2(low = grey_red[3],
+                       high = flag_colors[5])  +
+  scale_x_continuous(breaks = (seq(0,23,1))) +
+  theme(axis.line = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(vjust = 1)) +
+  labs(title = '24 Hour Clock of When Accidents Occur',
+        subtitle = 'Chicago, IL 2021') +
+  xlab('') +
+  ylab('')
+```
+
+Vehicles
+==================
+
+Row {data-height=650}
+-------------------------------------
+
+```{r network graph, fig.width = 16, fig.height = 6.75}
+
+# filter and proportion of crashes
+traffic_connect_prop <- traffic %>%
+  filter(year(date) == 2021) %>%
+  mutate(area_hit = replace(area_hit, area_hit == 'OTHER', 'OTHER AREA'),
+         area_hit = replace(area_hit, area_hit == 'TOTAL (ALL AREAS)', 'TOTAL')) %>%
+  count_summary() %>%
+  mutate(percent = n/sum(n) * 100) %>%
+  rename(crashes = n)
+
+# ggraph network graph
+traffic_connect_prop %>%
+  ggraph(layout = "linear", circular = TRUE) +
+  
+  # controls color / alpha / width of 'arms'
+  geom_edge_arc(aes(edge_alpha = percent, edge_width = percent), color = flag_colors[1], fold = TRUE, lineend = 'round') +
+  
+  # text for area hit
+  geom_node_text(aes(filter = name %in% traffic_connect_prop$area_hit, label = name), size = 3, hjust = .5, repel = T) +
+  
+  # labels for maneuver
+  geom_node_label(aes(filter = name %in% traffic_connect_prop$maneuver, label = name), size = 3, fill = flag_colors[2], repel = T) +
+  
+  # aesthetics
+  theme_cel() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = 'bottom') +
+  labs(title = 'Where is the First Point of Contact, Given a Maneuver?',
+       subtitle = 'Labels are Maneuvers, Thickness is % of Accidents Hitting Area')
+```
+
+Row {data-height=350}
+-------------------------------------
+
+```{r lollipop, fig.width = 8}
+# Summarise by make
+make_data <- traffic %>%
+  filter(!is.na(make),
+         make != 'UNKNOWN',
+         year(date) == 2021) %>%
+  mutate(make = fct_lump(make, n = 20)) %>%
+  group_by(make) %>%
+  summarise(n = n(), 
+            date = year(date)) %>%
+  mutate(make = str_to_title(make))
+
+# Lillipop chart of car makes
+ggplot(make_data) +
+  
+  # sticks of lollipop
+  geom_segment(aes(x = fct_reorder(make, n), xend = make, y = 0, yend = n), color = grey_red[2]) +
+  
+  # circles on end of segments
+  geom_point(aes(x = make, y = n), size = 5, color = flag_colors[4]) +
+  coord_flip() +
+  
+  # aesthetics
+  theme_cel() +
+  xlab('') +
+  ylab('') +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(title = 'Number of Accidents by Car Make in Thousands',
+       subtitle = 'Chicago, IL 2021') +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(hjust = .75)) + 
+  
+  # prevents from being cut off if not in reactive environment
+  expand_limits(y = c(0, ceiling(max(make_data$n)) + 1000))
+```
+
+```{r make bar, fig.width = 8}
+# Simple bar plot of top 12 make / model
+
+# summarise
+traffic %>%
+  filter(!is.na(model),
+         make %!in% c('UNKNOWN', 'MOTORIZED'),
+         model %!in% c('OTHER (EXPLAIN IN NARRATIVE)', 'UNKNOWN'),
+         year(date) == 2021) %>%
+  group_by(model, make) %>%
+  summarise('count' = n()) %>%
+  arrange(desc(count)) %>%
+  head(12) %>%
+  
+# plot  
+  ggplot() +
+  geom_col(aes(x = fct_rev(fct_reorder(model, count)), y = count, fill = make), color = 'gray') +
+  
+  # aesthetics
+  scale_fill_manual(values = c(flag_colors, grey_red)) +
+  labs(title = 'What make and model cars are getting in the most accidents?',
+       subtitle = '...or maybe simply which are popular',
+       fill = 'Make') +
+  ylab('Number of Accidents') +
+  xlab('') +
+  theme_cel() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+```
+
+People and Predictions
+==================
+
+Row {data-height=550}
+-------------------------------------
+###
+
+```{r mosaic}
+# Creating age group bins
+people_range <- people %>%
+  drop_na(sex, age) %>%
+  filter(sex %!in% 'X') %>%
+  mutate(age_range = case_when(age < 25 ~'under 25',
+                               age < 45 ~'25-45',
+                               age < 65 ~'45-65',
+                               TRUE ~'over 65'),
+         sex = case_when(sex == 'F' ~'Female',
+                         sex == 'M' ~'Male'))
+
+# Rearranging factors for display
+people_range$age_range <- factor(people_range$age_range, levels = c('under 25', '25-45', '45-65', 'over 65'))
+
+# Mosaic plot
+ggplot(people_range) +
+  geom_mosaic(aes(x = product(sex), fill = age_range)) +
+  
+  # aesthetics
+  theme_cel() +
+  theme(axis.line = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(title = 'Who is getting into accidents in Chicago?',
+       fill = 'Age Range',
+       caption = 'All Data from Chicago Open Data') +
+  ylab('') +
+  xlab('') +
+  scale_fill_manual(values = flag_colors[-2],
+                    guide=guide_legend(reverse=T)) 
+```
+
+###
+
+```{r model hidden, results = 'asis'}
+# Here is the actual model, but I pulled out the html and adjusted some of the aesthetics
+
+#traffic_model <- traffic %>%
+#   mutate(is_severe = if_else(str_detect(crash_type, 'TOW'), TRUE, FALSE),
+#         four_way = if_else(roadtype == 'FOUR WAY', TRUE, FALSE),
+#         bad_weather = if_else(weather %in% c('RAIN', 'FREEZING RAIN/DRIZZLE', 'SLEET/HAIL', 'SNOW'), TRUE, FALSE),
+#         wet_road = if_else(str_detect(road_cond, 'SNOW | WET | ICE'), TRUE, FALSE)) %>%
+ # select(is_severe, four_way, bad_weather, wet_road)
+
+
+#model1 <- glm(is_severe~ four_way, data = traffic_model, binomial(link = 'probit'))
+
+#model2 <- glm(is_severe~ four_way + bad_weather, data = traffic_model, binomial(link = 'probit'))
+
+#model3 <- glm(is_severe~ four_way + bad_weather * wet_road, data = traffic_model, binomial(link = 'probit'))
+
+#stargazer::stargazer(model1, model2, model3, type = 'html', title = 'Chicago Crashes Model')
+```
+<table style="text-align:center; color:#2b2d42"><<caption><strong>Chicago Crashes Model</strong></caption>
+<tr><td colspan="4" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left"></td><td colspan="3"><em>Dependent variable:</em></td></tr>
+<tr><td></td><td colspan="3" style="border-bottom: 1px solid black"></td></tr>
+<tr><td style="text-align:left"></td><td colspan="3">is_severe</td></tr>
+<tr><td style="text-align:left"></td><td>(1)</td><td>(2)</td><td>(3)</td></tr>
+<tr><td colspan="4" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left">four_way</td><td>0.639<sup>***</sup></td><td>0.639<sup>***</sup></td><td>0.633<sup>***</sup></td></tr>
+<tr><td style="text-align:left"></td><td>(0.009)</td><td>(0.009)</td><td>(0.009)</td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td></td></tr>
+<tr><td style="text-align:left">bad_weather</td><td></td><td>0.125<sup>***</sup></td><td>0.225<sup>***</sup></td></tr>
+<tr><td style="text-align:left"></td><td></td><td>(0.009)</td><td>(0.010)</td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td></td></tr>
+<tr><td style="text-align:left">wet_road</td><td></td><td></td><td>-0.299<sup>***</sup></td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td>(0.024)</td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td></td></tr>
+<tr><td style="text-align:left">bad_weatherTRUE:wet_road</td><td></td><td></td><td>-0.120<sup>***</sup></td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td>(0.030)</td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td></td></tr>
+<tr><td style="text-align:left">Constant</td><td>-0.520<sup>***</sup></td><td>-0.534<sup>***</sup></td><td>-0.529<sup>***</sup></td></tr>
+<tr><td style="text-align:left"></td><td>(0.003)</td><td>(0.003)</td><td>(0.003)</td></tr>
+<tr><td style="text-align:left"></td><td></td><td></td><td></td></tr>
+<tr><td colspan="4" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left">Observations</td><td>226,336</td><td>226,336</td><td>226,336</td></tr>
+<tr><td style="text-align:left">Log Likelihood</td><td>-140,163.200</td><td>-140,056.900</td><td>-139,721.900</td></tr>
+<tr><td style="text-align:left">Akaike Inf. Crit.</td><td>280,330.300</td><td>280,119.800</td><td>279,453.900</td></tr>
+<tr><td colspan="4" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left"><em>Note:</em></td><td colspan="3" style="text-align:right"><sup>*</sup>p<0.1; <sup>**</sup>p<0.05; <sup>***</sup>p<0.01</td></tr>
+</table>
+
+
+
+Row {data-height=350}
+-------------------------------------
+###
+
+```{r injury bar, fig.width = 16}
+# Simple bar plot regarding injuries
+people %>%
+  filter(action %!in% c('UNKNOWN', 'NONE', NA, 'OTHER'),
+         !is.na(injury),
+         injury %!in% c('NO INDICATION OF INJURY')) %>%
+  ggplot(aes(x = fct_rev(action), fill = injury)) +
+  geom_bar(position = 'fill') +
+  
+  # aesthetics
+  theme_cel() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = 'bottom',
+        legend.text = element_text(size = 7),
+        legend.key.size = unit(.5, 'cm'),
+        legend.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_text(size = 9)) +
+  scale_y_continuous(expand = c(0,0)) +
+  xlab('') +
+  ylab('') +
+  labs(title = 'What Actions Lead to Serious Injury?',
+       subtitle = 'If Injury and Action Recorded',
+         caption = 'https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if') +
+  scale_fill_manual(values = flag_colors[-2]) +
+  coord_flip()
+```
+
+
