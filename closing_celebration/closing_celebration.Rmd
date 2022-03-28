@@ -1,0 +1,506 @@
+---
+title: "Closing Celebration Challenge"
+author: "sg"
+date: "3/14/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load packages}
+library(tidyverse)
+library(viridis)
+library(lubridate)
+library(scales)
+library(sf)
+library(tmap)
+library(kableExtra)
+library(ggraph)
+library(calendR)
+library(tidygraph)
+library(ggmosaic)
+```
+
+The data is coming from Chicago's data portal.  I have elected to combine a number of datasets under the Traffic Crashes umbrella (People, Crashes, Vehicles).
+
+```{r, echo=FALSE}
+path <- '/Users/SG/Documents/Programming/dac2022/closing_celebration/'
+
+crashes <- janitor::clean_names(read_csv('Traffic_Crashes_-_Crashes.csv'))
+people <- janitor::clean_names(read_csv(paste(path,'Traffic_Crashes_-_People.csv', sep = '')))
+vehicles <- janitor::clean_names(read_csv(paste(path, 'Traffic_Crashes_-_Vehicles.csv', sep = '')))
+
+
+#vehicles <- jsonlite::read_json('https://data.cityofchicago.org/resource/68nd-jvt3.json?$limit=200000', simplifyVector = TRUE)
+
+#crashes <- jsonlite::read_json('https://data.cityofchicago.org/resource/85ca-t3if.json?$limit=200000', simplifyVector = TRUE)
+
+#people <- jsonlite::read_json('https://data.cityofchicago.org/resource/u6pd-qa9d.json?$limit=200000', simplifyVector = TRUE)
+
+`%!in%` <- Negate(`%in%`)
+count_summary <- function(data){
+  data %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n())
+}
+```
+
+```{r}
+flag_colors <- c('#e63946', '#f1faee', '#a8dadc', '#457b9d', '#1d3557')
+
+grey_red <- c('#2b2d42', '#8d99ae', '#edf2f4', '#ef233c', '#d90429')
+
+bg_color <- '#f8f9fa'
+
+bg_photo <- '/Users/SG/Documents/Programming/dac2022/closing_celebration/pedro-lastra-Nyvq2juw4_o-unsplash.jpg'
+
+bg_photo2 <- '/Users/SG/Documents/Programming/dac2022/closing_celebration/neal-kharawala-XXA8PTuLD1Y-unsplash.jpg'
+
+theme_cel <- function(base_size = 11,
+                      base_family = 'serif'){
+    theme(
+      rect = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      line = element_line(color = grey_red[1]),
+      
+      axis.ticks = element_line(),
+      axis.ticks.y = element_blank(),
+      axis.line = element_line(linetype = 1, colour = grey_red[1]),
+      
+      legend.key = element_rect(linetype = 0, fill = bg_color),
+      
+      panel.background = element_rect(linetype = 0, fill = bg_color),
+      panel.border = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.background = element_rect(fill = bg_color, colour = NA, linetype = 0),
+      plot.background = element_rect(fill = bg_color, colour = NA))
+}
+```
+
+Cleaning the data
+
+```{r, echo=FALSE}
+# Some preliminary cleaning and joining Vehicles + Crashes
+vehicles <- vehicles %>%
+  select(id = crash_record_id,
+         date = crash_date,
+         make,
+         model,
+         type = vehicle_type,
+         maneuver,
+         passengers = num_passengers,
+         area_hit = first_contact_point) %>%
+  mutate(date = mdy_hms(date),
+         passengers = replace_na(passengers, 0))
+
+people <- people %>%
+  select(id = crash_record_id,
+         action = driver_action,
+         injury = injury_classification,
+         airbag = airbag_deployed,
+         zipcode,
+         sex,
+         age)  %>%
+  mutate(age_group = case_when(
+    age < 21 ~'Under 21',
+    age >= 21 & age <= 44 ~'21-44',
+    age > 44 & age < 65 ~'45-64',
+    age >= 65 ~'65 and over',
+    TRUE ~'NA'),
+    airbag = if_else(str_detect(airbag, 'DEPLOYED'), TRUE, FALSE),
+    airbag = replace_na(airbag, FALSE),
+    is_injured = if_else(str_detect(injury, 'NO INDICATION'), FALSE, TRUE))
+
+crashes <- crashes %>%
+  select(id = crash_record_id,
+         street = street_name,
+         weather = weather_condition,
+         roadtype = trafficway_type,
+         speed = posted_speed_limit,
+         road_cond = roadway_surface_cond,
+         crash_type,
+         damage,
+         latitude,
+         longitude,
+         location) %>%
+  mutate(is_severe = if_else(str_detect(crash_type, 'TOW'), TRUE, FALSE),
+         four_way = if_else(roadtype == 'FOUR WAY', TRUE, FALSE),
+         bad_weather = if_else(weather %in% c('RAIN', 'FREEZING RAIN/DRIZZLE', 'SLEET/HAIL', 'SNOW'), TRUE, FALSE),
+         expensive = if_else(damage %in% 'OVER $1,500', TRUE, FALSE),
+         wet_road = if_else(str_detect(road_cond, 'SNOW | WET | ICE'), TRUE, FALSE),
+         year = year(date))
+
+traffic <- left_join(crashes, vehicles, by = 'id')
+```
+
+
+```{r}
+crash_dummy <- traffic %>%
+  mutate(is_severe = if_else(str_detect(crash_type, 'TOW'), TRUE, FALSE),
+         four_way = if_else(roadtype == 'FOUR WAY', TRUE, FALSE),
+         bad_weather = if_else(weather %in% c('RAIN', 'FREEZING RAIN/DRIZZLE', 'SLEET/HAIL', 'SNOW'), TRUE, FALSE),
+         expensive = if_else(damage %in% 'OVER $1,500', TRUE, FALSE))
+
+crash_mod <- glm(is_severe~ bad_weather + four_way, data = crash_dummy, binomial(link = 'probit'))
+
+summary(crash_mod)
+
+crash_pass <- glm(is_severe~ passengers, data = crash_dummy, binomial(link = 'probit'))
+
+money_rain <- glm(expensive~ bad_weather, data = crash_dummy, binomial(link = 'probit'))
+
+summary(crash_pass)
+summary(money_rain)
+
+severe_wet <- glm(expensivee~  bad_weather * wet_road, data = traffic, binomial(link = 'probit'))
+
+summary(severe_wet)
+
+plot(severe_wet)
+
+```
+
+Some exploratory plots.  The danger with some of these simple counting plots is I am likely counting the most popular cars, as opposed to the cars most likely to get into an accident.  It would be nice if I could find some IL or Chicago data about vehicle market share, but I haven't been able to find a suitable dataset.
+
+``` {r}
+traffic %>%
+  filter(!is.na(make),
+         make != 'UNKNOWN') %>%
+  mutate('make' = fct_lump(make, n = 20)) %>%
+  ggplot() +
+  geom_histogram(aes(fct_rev(make)), stat = 'count', fill = flag_colors[5]) +
+  coord_flip() +
+  theme_cel() +
+  xlab('') +
+  ylab('') +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(title = 'Number of Accidents by Car Make',
+       subtitle = 'in the past 4 days Chicago, IL')
+
+traffic %>%
+  filter(!is.na(model),
+         make != 'UNKNOWN',
+         model != 'OTHER (EXPLAIN IN NARRATIVE)',
+         make != 'MOTORIZED') %>%
+  group_by(model, make) %>%
+  summarise('count' = n()) %>%
+  arrange(desc(count)) %>%
+  head(12) %>%
+  ggplot() +
+  geom_col(aes(x = fct_rev(fct_reorder(model, count)), y = count, fill = make), color = 'gray') +
+  scale_fill_manual(values = flag_colors) +
+  labs(title = 'What make and model cars are getting in the most accidents?',
+       subtitle = '...or maybe simply which are popular',
+       fill = 'Make') +
+  ylab('Number of Accidents') +
+  xlab('Model') +
+  theme_cel()
+  
+
+# The x axis here is fucking brutal
+traffic %>%
+  group_by(time = hour(date)) %>%
+  summarise(count = n()) %>%
+  ggplot() +
+  geom_col(aes(x = time, y = count))
+
+traffic %>%
+  ggplot() +
+  geom_histogram(aes(maneuver), stat = 'count') +
+  coord_flip()
+
+
+traffic %>%
+  ggplot() +
+  geom_histogram(aes(occupants), stat = 'count')
+
+traffic %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'OTHER'),
+         area_hit %!in% c('UNKNOWN', 'OTHER')) %>%
+  ggplot() +
+  geom_jitter(aes(x = maneuver, y = area_hit)) +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+
+```{r}
+
+
+chi_sf %>%
+ggplot() +
+  geom_sf() +
+  geom_sf(data = traffic_sf, aes(color = count), alpha = 0.4)
+```
+
+```{r}
+setwd('/Users/SG/Documents/Programming/dac2022/L9_Upload')
+chi_sf <- st_read("chicago_tracts_2010.shp")
+chi_sf <- st_transform(chi_sf, 4326)
+traffic_sf <- traffic %>% drop_na(c(latitude, longitude)) %>%
+  st_as_sf(coords = c('longitude', 'latitude'), crs = 4326)
+
+traffic_sf <- st_join(
+  traffic_sf,
+  chi_sf, 
+  join = st_within
+  )
+
+traffic_sf$geometry.1 <- NULL
+traffic_sf <- traffic_sf %>%
+  group_by(geoid) %>%
+  summarise(count = n())
+
+traffic_sf_test <- st_join(
+  chi_sf,
+  traffic_sf
+  )
+
+tmap_mode('view')
+tm_shape(traffic_sf, name="Chicago Accidents") + tm_bubbles(size = 'count', col = grey_red[5], scale = 1/3) +
+  tm_basemap('Esri.WorldStreetMap')
+```
+
+
+Creating a contingency table for maneuver/area_hit
+
+```{r}
+traffic_kable <- traffic %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n/sum(n) * 100) %>%
+  pivot_wider(id_cols = maneuver,
+              names_from = c(area_hit),
+              values_from = c(prop)) %>%
+  mutate_at(c(1:14), ~replace(., is.na(.), 0)) %>%
+  mutate_if(is.numeric, round) %>%
+  kbl() %>%
+  kable_classic(full_width = F, html_font = 'Cambria')
+  
+traffic_kable
+```
+
+Consider Correlation Matrix (LOL NO)
+```{r}
+library(Hmisc)
+library(corrplot)
+traffic_corr <- traffic %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n())
+
+library(corrplot)
+traffic_corr2 <- traffic %>%
+  filter(maneuver %!in% c('UNKNOWN/NA', 'NA'),
+         area_hit %!in% c('UNKNOWN', 'NA')) %>%
+  drop_na(maneuver, area_hit) %>%
+  group_by(maneuver, area_hit) %>%
+  summarise(n = n()) %>%
+  pivot_wider(id_cols = maneuver,
+              names_from = c(area_hit),
+              values_from = c(n)) %>%
+  mutate_at(c(1:14), ~replace(., is.na(.), 0))
+
+traffic_corr3 <- matrix(rep(FALSE, 286), nrow = 22)
+
+traffic_corr2 <- as.matrix(traffic_corr2)
+names <- traffic_corr2[,1]
+colnames <- colnames(traffic_corr2)
+rownames(traffic_corr2) <- names
+traffic_corr2 <- traffic_corr2[,-1]
+traffic_corr3[] <- as.numeric(traffic_corr2)
+rownames(traffic_corr3) <- names
+colnames(traffic_corr3) <- colnames
+
+
+corrplot(cor(traffic_corr3),
+         method = 'shade',
+         type = 'full',
+         diag = FALSE,
+         tl.col = 'black',
+         bg = 'white'
+         )
+```
+
+
+Let's do use ggraph to make a network graph
+```{r}
+traffic_connect_prop <- traffic %>%
+  mutate(area_hit = replace(area_hit, area_hit == 'OTHER', 'OTHER AREA')) %>%
+  filter(year == 2022) %>%
+  count_summary() %>%
+  mutate(percent = n/sum(n) * 100) %>%
+  rename(crashes = n)
+
+traffic_connect_prop %>%
+  ggraph(layout = "linear", circular = TRUE) +
+  geom_edge_arc(aes(edge_alpha = percent, edge_width = percent), color = flag_colors[1], fold = TRUE, lineend = 'round') +
+  geom_node_text(aes(filter = name %in% traffic_connect_prop$area_hit, label = name), size = 3) +
+  geom_node_label(aes(filter = name %in% traffic_connect_prop$maneuver, label = name), size = 3, repel = T, fill = flag_colors[2]) +
+  theme_cel() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = '% of Accidents Resulting in First Point of Contact, Given a Maneuver',
+       subtitle = 'Labels are Maneuvers')
+
+
+
+traffic_connect_count <- traffic %>%
+  mutate(area_hit = replace(area_hit, area_hit == 'OTHER', 'OTHER AREA')) %>%
+  count_summary() %>%
+  rename(crashes = n)
+
+
+traffic_connect_count %>%
+  ggraph(layout = "linear", circular = TRUE) +
+  geom_edge_arc(aes(edge_alpha = crashes, edge_width = crashes), color = 'darkred') +
+  geom_node_text(aes(filter = name %in% traffic_connect_count$area_hit, label = name), size = 3, col = 'navy') +
+  geom_node_text(aes(filter = name %in% traffic_connect_count$maneuver, label = name), size = 3, repel = T, col = 'black') +
+  theme_graph()
+```
+
+Let's try a calendar heatmap
+```{r}
+scale_fn <- function(x) { x / sqrt(sum(x^2)) }
+
+date_traffic <- traffic %>%
+  filter(year(date) == 2022) %>%
+  group_by(date = as.Date(date)) %>%
+  summarise(accidents = n()) %>%
+  mutate(scale_acc = scale_fn(accidents))
+
+
+if (unique(year(date_traffic$date)) == year(Sys.Date())){
+    
+    days <- rep(min(date_traffic$scale_acc) - 0.05, 365)
+    days[1:nrow(date_traffic)] <- date_traffic$scale_acc
+} else {
+    days <- date_traffic$scale_acc
+}
+
+calendR(year = as.numeric(unique(format(date_traffic$date, format = '%Y'))),
+        special.days = days,
+        gradient = TRUE,
+        low.col = '#edf2f4',
+        special.col = '#e63946',
+        bg.img = bg_photo,
+        title = paste('Heatmap of Traffic Accidents Year ', unique(year(date_traffic$date))),
+        title.size = 20,
+        title.col = grey_red[1],
+        lty = 1,
+        lwd = 0.1,
+        col = grey_red[1],
+        days.col = grey_red[1],
+        day.size = 3,
+        subtitle = 'Chicago, IL | Photo: Pedro Lastra',
+        subtitle.col = grey_red[1],
+        weeknames = c("Mo", "Tu",  
+                      "We", "Th",
+                      "Fr", "Sa",
+                      "Su"),
+        weeknames.col = 'black',
+        weeknames.size = 4,
+        font.family = 'sans')
+```
+
+Let's do something with the people
+```{r}
+people_range <- people %>%
+  drop_na(sex, age) %>%
+  filter(sex %!in% 'X') %>%
+  mutate(age_range = case_when(age < 25 ~'under 25',
+                               age < 45 ~'25-45',
+                               age < 65 ~'45-65',
+                               TRUE ~'over 65'))
+
+people$age_group <- factor(people$age_group, levels = c('under 25', '25-45', '45-65', 'over 65'))
+
+people %>% 
+  drop_na(age_group) %>%
+  filter(sex %!in% 'X') %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(sex), fill = age_group)) #+
+  theme(panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank()) +
+  labs(title = 'Who is getting into accidents in Chicago?') +
+  ylab('Age Range') +
+  scale_fill_manual(values = flag_colors[-2]) +
+  theme_cel()
+```
+
+```{r}
+people %>%
+  drop_na(action) %>%
+  filter(action %!in% c('NONE', 'UNKNOWN')) %>%
+  ggplot() +
+  geom_histogram(aes(action), stat = 'count') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+people %>%
+  drop_na(action, age) %>%
+  filter(action %!in% c('NONE', 'UNKNOWN', 0)) %>%
+  ggplot() +
+  geom_jitter(aes(x = age_group, y = action))
+
+people %>%
+  drop_na(sex, age_group) %>%
+  filter(sex != 'X') %>% 
+  ggplot() +
+  geom_jitter(aes(sex, age_group))
+
+
+choro$ggplot_scale = scale_fill_brewer()
+choro$render()
+
+geo <- geocode_zip(people$zipcode)
+people_sf <- left_join(people, geo, by = 'zipcode') %>%
+  drop_na(lat, lng)  %>%
+  st_as_sf(coords = c('lng', 'lat'), crs = 4269)
+
+chi_sf <- st_read(path)
+chi_sf <- st_transform(chi_sf, 4269)
+
+people_sf <- people_sf %>% st_join(chi_sf, join = st_within)
+
+people_sf <- people_sf%>%
+  drop_na(geoid) %>%
+  group_by(geoid) %>%
+  summarise(crash = n())
+
+ggplot() +
+  geom_sf(data = people_sf, aes(fill = crash, colour = crash))
+
+
+people %>%
+  group_by(zipcode) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+```
+
+```{r}
+people_mod <- people %>%
+  filter(sex %!in% c('X', NA)) %>%
+  mutate(is_male = if_else(sex == 'M', TRUE, FALSE))
+
+model = glm(is_male~ age_group, data = people_mod, binomial(link = 'probit'))
+  
+summary(model)
+
+airbag_mod <- glm(is_injured~ airbag + age_group, data = people, binomial(link = 'probit'))
+summary(airbag_mod)
+
+```
+
