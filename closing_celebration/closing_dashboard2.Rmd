@@ -253,7 +253,20 @@ tm_shape(sf_group) +
 # group by time and summarise
 traffic %>%
   filter(year(date) == 2021) %>%
+  mutate(year = year(date)) %>%
+  
+  # get accidents in each hour
   group_by(time = hour(date)) %>%
+  summarise(accidents = n(), across(year)) %>%
+  
+  # Dynamically calculate accidents / year
+  mutate(accident_hour = if_else(year == year(Sys.Date()),
+                                 accidents / (as.numeric(Sys.Date()) - as.numeric(floor_date(Sys.Date()))) / 24, 
+                                 accidents / 365 / 24)) %>%
+  ungroup() %>%
+  
+  # regroup to summarise with accident / hour
+  group_by(time, accidents, accident_hour) %>%
   summarise(accidents = n()) %>%
   
   # ggplot
@@ -269,7 +282,7 @@ traffic %>%
   geom_rect(aes(xmin = 18, xmax = 24, ymin = 0, ymax = Inf), fill = flag_colors[3], alpha = 0.02) +
   
   # simple bar plot
-  geom_col(aes(x = time, y = accidents, fill = accidents)) +
+  geom_col(aes(x = time, y = accident_hour, fill = accident_hour)) +
   
   # custom theme
   theme_cel() +
@@ -286,7 +299,8 @@ traffic %>%
         axis.text.y = element_blank(),
         axis.text.x = element_text(vjust = 1)) +
   labs(title = '24 Hour Clock of When Accidents Occur',
-        subtitle = 'Chicago, IL 2021') +
+        subtitle = 'Chicago, IL 2021',
+       fill = 'Accidents per Hour') +
   xlab('') +
   ylab('')
 ```
